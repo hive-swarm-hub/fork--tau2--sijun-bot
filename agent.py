@@ -6,6 +6,7 @@ The agent receives customer messages and domain tools, and must follow the domai
 
 import json
 import os
+import re
 import time
 
 import litellm
@@ -26,7 +27,7 @@ from tau2.data_model.message import (
 )
 from tau2.environment.tool import Tool
 
-# ── PROMPT (the main lever for improving performance) ─────────────────────────
+# ── PROMPT ──────────────────────────────────────────────────────────────────
 
 INSTRUCTIONS = """
 You are a customer service agent. Follow the <policy> exactly — it is your sole source of truth.
@@ -37,53 +38,48 @@ You are a customer service agent. Follow the <policy> exactly — it is your sol
 3. Before any action that modifies data, list what you will do and get explicit user confirmation.
 4. The APIs do NOT enforce policy — you must verify rules are met before calling.
 5. If a request violates policy, deny it and explain why.
-6. Transfer to human agent only if the request is out of scope. To transfer: call transfer_to_human_agents, then send "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON."
+6. Transfer to human agent only if the request is out of scope. To transfer: FIRST make a tool call to transfer_to_human_agents, THEN in the next turn send "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON." You MUST call the tool — do not just say the transfer message.
 7. Do not proactively offer compensation unless the user explicitly asks.
-8. Stay on topic — you are a customer service agent. Do not engage in off-topic conversation.
+8. Stay on topic — you are a customer service agent.
 
 ## Customer identification
 - When a user gives a string like "firstname_lastname_1234", treat it as a user_id and look it up directly with get_user_details.
-- For name-based lookups that require DOB: NEVER call the lookup with an empty or missing DOB. Instead, ask the user for their phone number, customer ID, or date of birth.
-- If one lookup method fails, suggest alternatives.
+- For name-based lookups that require DOB: NEVER call the lookup with an empty or missing DOB. Ask for phone number, customer ID, or DOB instead.
 
 ## Be proactive with tools
 - When you have a user ID, look up their details right away.
-- If you need to find which reservation/order is relevant, look up ALL of them and figure it out.
-- Use search tools to find options (flights, products, plans) rather than asking the user for exact IDs.
-- Look up current prices/availability from tools — never reuse old prices or guess.
-- After getting user details, check their orders/reservations/bills proactively to help.
+- If you need to find which reservation/order is relevant, look up ALL of them.
+- Use search tools to find options rather than asking the user for exact IDs.
+- Look up current prices/availability from tools — never guess.
+- When the user confirms an action, proceed IMMEDIATELY with the update/modify/book tool call. Do NOT re-fetch details — call the action tool directly.
 
 ## After each tool result
 - Read the full result carefully. Check what is present AND what might be missing relative to policy.
 - Use exact values from results (IDs, dates, amounts). Never guess.
 
 ## Technical support (telecom)
-- CRITICAL: The customer may have MULTIPLE lines. Match the line's phone_number to the user's phone number. If the first line doesn't match, check ALL other lines until you find the right one.
-- Follow the troubleshooting workflow step by step, in order. Do not skip steps.
-- After each fix, re-test (run speed test or check diagnostics) to verify the issue is resolved.
-- Only "Excellent" speed means the data issue is fully resolved.
-- NEVER transfer to human agent for technical issues (MMS, data, service) until you have exhausted ALL troubleshooting steps. The ONLY reasons to transfer immediately are: locked SIM (PIN/PUK) or expired contract on a suspended line.
-- If roaming_enabled is false AND the user is abroad/traveling: you MUST call enable_roaming on their line AND ask them to toggle data roaming ON on their device. Both backend and device fixes are needed.
-- If data_used_gb exceeds data_limit_gb: offer data refueling (max 2GB) or plan change.
-- All tools listed in your tool list ARE available. If the policy mentions a tool (like make_payment), it IS in your tools.
-- For bill payment: after send_payment_request and user accepts, use make_payment to complete it.
-- For MMS issues, check ALL systematically: service → mobile data → network mode (must be 3G+) → Wi-Fi calling (turn OFF) → app permissions (messaging app needs sms AND storage) → APN/MMSC settings.
-- For slow data: check data saver (OFF), network mode (upgrade to 4G/5G), VPN (disconnect).
+- CRITICAL: The customer may have MULTIPLE lines. Match the line's phone_number to the user's phone. If the first line doesn't match, check ALL other lines.
+- Follow the troubleshooting workflow step by step. Do not skip steps.
+- After each fix, re-test (speed test or diagnostics) to verify.
+- Only "Excellent" speed means fully resolved.
+- NEVER transfer to human for technical issues until ALL troubleshooting steps are exhausted. Transfer ONLY for: locked SIM (PIN/PUK) or expired contract on suspended line.
+- If roaming_enabled is false AND user is abroad: MUST call enable_roaming AND ask user to toggle device data roaming ON.
+- If data_used_gb > data_limit_gb: offer data refueling (max 2GB) or plan change.
+- All tools in your tool list ARE available. make_payment, send_payment_request etc. are real tools.
+- For MMS: check ALL in order — service → mobile data → network mode (3G+) → Wi-Fi calling (OFF) → app permissions (sms + storage) → APN/MMSC.
+- For slow data: data saver (OFF) → network mode (4G/5G) → VPN (disconnect).
+- For service issues: check airplane mode → SIM status → billing/suspension → APN settings.
 
 ## Airline rules
-- Basic economy: flights CANNOT be changed directly. To change flights: FIRST upgrade cabin class (to economy), THEN change flights in a second update call. Two separate calls required.
-- Cancellations: check EACH reservation individually. At least one must be true: (a) booked within 24h of current time 2024-05-15 15:00 EST, (b) airline cancelled flight, (c) business class, (d) travel insurance with covered reason. Membership does NOT grant cancellation rights.
-- Use the calculate tool for all price/savings computations.
-- For round trips: search outbound AND return separately.
+- Basic economy: flights CANNOT be changed. To change flights on basic economy: FIRST call update to upgrade cabin (to economy). THEN make a SECOND separate call to change flights. These MUST be two separate tool calls.
+- Cancellations: check EACH reservation. Cancellation allowed only if: (a) booked within 24h of 2024-05-15 15:00 EST, (b) airline cancelled flight, (c) business class, (d) travel insurance with covered reason. Membership does NOT grant cancellation.
+- Use calculate tool for price computations.
+- Round trips: search outbound AND return separately.
 
 ## Retail rules
 - Authenticate by email or name+zip first, even if user provides user_id.
-- Check order status: use modify_pending_order_items for pending, exchange_delivered_order_items for delivered.
-- Exchanges/modifications can only be called ONCE per order — collect ALL changes first.
-
-## General pitfalls
-- Check ALL overdue bills before resuming a suspended line.
-- When searching for flights, use search_direct_flight or search_onestop_flight tools.
+- Check order status: modify_pending_order_items for pending, exchange_delivered_order_items for delivered.
+- Exchanges/modifications: ONE call per order — collect ALL changes first.
 """.strip()
 
 SYSTEM_TEMPLATE = """
@@ -97,7 +93,47 @@ SYSTEM_TEMPLATE = """
 
 # ── MESSAGE CONVERSION ────────────────────────────────────────────────────────
 
-def to_api_messages(messages):
+def detect_domain(policy):
+    lower = policy.lower()
+    if "airline" in lower and "reservation" in lower and "flight" in lower:
+        return "airline"
+    elif "retail" in lower and "pending" in lower and "delivered" in lower:
+        return "retail"
+    elif "telecom" in lower:
+        return "telecom"
+    return "unknown"
+
+
+def annotate_tool_result(content, domain):
+    """Add brief annotations to help the model notice critical data."""
+    if not content:
+        return content
+    notes = []
+    if domain == "telecom":
+        if '"roaming_enabled": false' in content:
+            notes.append("roaming_enabled=false. If user is abroad: call enable_roaming + ask device toggle.")
+        used = re.search(r'"data_used_gb":\s*([\d.]+)', content)
+        limit = re.search(r'"data_limit_gb":\s*([\d.]+)', content)
+        if used and limit and float(used.group(1)) > float(limit.group(1)):
+            notes.append("Data OVER limit. Offer refueling or plan change.")
+        if '"phone_number"' in content and '"line_id"' in content:
+            notes.append("Verify this line's phone_number matches user's phone.")
+    elif domain == "airline":
+        if '"cabin": "basic_economy"' in content:
+            notes.append("BASIC ECONOMY: cannot change flights. Upgrade cabin first, then change flights in 2nd call.")
+        if '"cabin": "business"' in content and '"reservation_id"' in content:
+            notes.append("BUSINESS class: always eligible for cancellation.")
+    elif domain == "retail":
+        if '"status": "pending"' in content and '"order_id"' in content:
+            notes.append("PENDING order: use modify_pending_order_* tools.")
+        elif '"status": "delivered"' in content and '"order_id"' in content:
+            notes.append("DELIVERED order: use exchange/return_delivered_order_* tools.")
+    if notes:
+        return content + "\n[NOTES: " + " | ".join(notes) + "]"
+    return content
+
+
+def to_api_messages(messages, annotator=None):
     """Convert tau2 message objects to OpenAI-style dicts."""
     out = []
     for m in messages:
@@ -118,7 +154,10 @@ def to_api_messages(messages):
                 ]
             out.append(d)
         elif isinstance(m, ToolMessage):
-            out.append({"role": "tool", "content": m.content or "", "tool_call_id": m.id})
+            content = m.content if m.content else ""
+            if annotator:
+                content = annotator(content)
+            out.append({"role": "tool", "content": content, "tool_call_id": m.id})
     return out
 
 
@@ -152,29 +191,31 @@ MAX_RETRIES = 3
 class CustomAgent(LLMAgent):
     """Self-contained customer service agent."""
 
-    def __init__(self, tools: list[Tool], domain_policy: str, llm=None, llm_args=None):
+    def __init__(self, tools, domain_policy, llm=None, llm_args=None):
         LocalAgent.__init__(self, tools=tools, domain_policy=domain_policy)
-        self.llm = llm or os.environ.get("SOLVER_MODEL", "gpt-5.4-mini")
+        self.llm = llm or os.environ.get("SOLVER_MODEL", "openai/gpt-5.4-mini")
         self.llm_args = dict(llm_args or {})
-        self.llm_args["top_p"] = 0.1  # reduce randomness (temp=0 unsupported)
+        self.llm_args["top_p"] = 0.1
+        self.domain = detect_domain(domain_policy)
 
     @property
-    def system_prompt(self) -> str:
+    def system_prompt(self):
         return SYSTEM_TEMPLATE.format(instructions=INSTRUCTIONS, policy=self.domain_policy)
 
-    def get_init_state(self, message_history=None) -> LLMAgentState:
+    def get_init_state(self, message_history=None):
         return LLMAgentState(
             system_messages=[SystemMessage(role="system", content=self.system_prompt)],
             messages=list(message_history or []),
         )
 
-    def generate_next_message(self, message: ValidAgentInputMessage, state: LLMAgentState):
+    def generate_next_message(self, message, state):
         if isinstance(message, MultiToolMessage):
             state.messages.extend(message.tool_messages)
         else:
             state.messages.append(message)
 
-        api_messages = to_api_messages(state.system_messages + state.messages)
+        annotator = lambda c: annotate_tool_result(c, self.domain)
+        api_messages = to_api_messages(state.system_messages + state.messages, annotator=annotator)
         api_tools = [t.openai_schema for t in self.tools] if self.tools else None
 
         for attempt in range(MAX_RETRIES):
@@ -197,5 +238,5 @@ class CustomAgent(LLMAgent):
         state.messages.append(assistant_msg)
         return assistant_msg, state
 
-    def set_seed(self, seed: int):
+    def set_seed(self, seed):
         self.llm_args["seed"] = seed
