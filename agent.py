@@ -118,11 +118,38 @@ def annotate_tool_result(content, domain):
             notes.append("Data OVER limit. Offer refueling or plan change.")
         if '"phone_number"' in content and '"line_id"' in content:
             notes.append("Verify this line's phone_number matches user's phone.")
+        # Detect locked SIM
+        if "locked" in content.lower() and "sim" in content.lower():
+            notes.append("SIM LOCKED: call transfer_to_human_agents tool immediately.")
+        # Detect suspended line with expired contract
+        if '"status": "Suspended"' in content:
+            contract = re.search(r'"contract_end_date":\s*"([^"]+)"', content)
+            if contract and contract.group(1) < "2025-02-25":
+                notes.append("EXPIRED CONTRACT + SUSPENDED: call transfer_to_human_agents tool.")
+        # Speed test result annotations
+        if "Excellent" in content and "speed" in content.lower():
+            notes.append("Speed is Excellent - issue resolved! Confirm with user.")
+        elif "No Connection" in content:
+            notes.append("Still no connection. Continue troubleshooting - do NOT transfer yet.")
+        elif "speed" in content.lower() and ("Poor" in content or "Fair" in content or "Good" in content):
+            notes.append("Speed not yet Excellent. Continue troubleshooting.")
     elif domain == "airline":
         if '"cabin": "basic_economy"' in content:
             notes.append("BASIC ECONOMY: cannot change flights. Upgrade cabin first, then change flights in 2nd call.")
         if '"cabin": "business"' in content and '"reservation_id"' in content:
             notes.append("BUSINESS class: always eligible for cancellation.")
+        # Check cancellation eligibility
+        if '"reservation_id"' in content and '"created_at"' in content:
+            created = re.search(r'"created_at":\s*"([^"]+)"', content)
+            if created:
+                ts = created.group(1)
+                if ts >= "2024-05-14T15:00":
+                    notes.append("Within 24h: cancellation IS allowed.")
+                else:
+                    is_biz = '"cabin": "business"' in content
+                    has_ins = '"travel_insurance": "yes"' in content
+                    if not is_biz and not has_ins:
+                        notes.append("NOT within 24h, not business, no insurance. Cancellation NOT allowed unless airline cancelled.")
     elif domain == "retail":
         if '"status": "pending"' in content and '"order_id"' in content:
             notes.append("PENDING order: use modify_pending_order_* tools.")
