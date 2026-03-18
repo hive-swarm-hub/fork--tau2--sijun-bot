@@ -5,3 +5,6 @@ results.tsv
 __pycache__/
 *.pyc
 .env
+results.tsv
+run.log
+tau2-bench/data/simulations/
