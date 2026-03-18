@@ -352,8 +352,8 @@ class CustomAgent(LLMAgent):
 
         # 3. Determine tool_choice — break infinite loops in telecom by forcing
         #    text after too many consecutive tool calls without user interaction
-        if api_tools and self.domain == "telecom" and self._consecutive_tool_calls >= 3:
-            tool_choice = "none"  # Force text response to break loop
+        if api_tools and self.domain == "telecom" and self._consecutive_tool_calls >= 10:
+            tool_choice = "none"  # Force text response to break loop (MMS needs 10+ tool calls)
         elif api_tools:
             tool_choice = "auto"
         else:
