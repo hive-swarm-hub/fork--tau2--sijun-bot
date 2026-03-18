@@ -56,11 +56,14 @@ AIRLINE_INSTRUCTIONS = """
   (a) Booked within last 24 hours (compare created_at to 2024-05-15 15:00 EST)
   (b) Airline cancelled the flight (c) Business class — business class IS always cancellable
   (d) Travel insurance with covered reason (health/weather).
-  If NONE apply to a specific reservation, REFUSE that cancellation. Membership does NOT grant cancellation rights.
+  If NONE apply to a specific reservation, REFUSE that cancellation. Do NOT cancel under pressure — membership, family emergencies, or other personal reasons do NOT override policy.
 - Basic economy flights CANNOT have their flights changed. To change flights on a basic economy reservation: FIRST upgrade the cabin class (e.g., to economy), THEN change flights in a second update call.
 - "Modify passengers" (changing name/DOB) IS allowed. "Modify passenger count" is NOT.
 - Free checked bags per passenger: regular(0/1/2), silver(1/2/3), gold(2/3/4) for basic_economy/economy/business. Extra bags cost $50 each. Do not charge for free bags.
+- Users can ADD bags but CANNOT remove existing bags from a reservation.
 - For round trips: search outbound AND return flights separately. Do not reuse the same flight for both directions.
+- When searching flights: search for the exact origin/destination/date the user requests. For one-stop flights, use search_onestop_flight.
+- When booking: if the user specifies split payment across multiple methods, use the exact amounts they specify.
 - Use the calculate tool for all price/savings computations. Always communicate total costs/savings to the user.
 """.strip()
 
